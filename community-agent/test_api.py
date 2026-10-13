@@ -4,6 +4,17 @@ from fastapi.testclient import TestClient
 
 from api import app
 
+with patch.dict("os.environ", {"DEEPSEEK_API_KEY": ""}):
+    try:
+        with TestClient(app):
+            pass
+    except RuntimeError as error:
+        assert "DEEPSEEK_API_KEY" in str(error)
+        print("通过：缺少 API Key 时拒绝启动")
+    else:
+        raise AssertionError(
+            "缺少 API Key 时，服务不应该启动成功"
+        )
 
 def main():
     fake_result = {
@@ -20,7 +31,10 @@ def main():
         "blocked_tool_calls": []
     }
 
-    with TestClient(app) as client:      #创建一个 TestClient 实例,把这个实例赋值给变量名 client,并用with在结束后可以自动做清理工作 
+    with (
+        patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}),
+        TestClient(app) as client
+    ):     #创建一个 TestClient 实例,把这个实例赋值给变量名 client,并用with在结束后可以自动做清理工作 
         with (
             patch("api.run_agent", return_value=fake_result) as mock_agent,
             patch("api.save_run", return_value="runs/test_run.json") as mock_save

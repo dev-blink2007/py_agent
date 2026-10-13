@@ -6,9 +6,23 @@ from pydantic import BaseModel, Field
 from call_model import run_agent
 from run_logger import save_run
 from fastapi.responses import JSONResponse
+import os
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not os.getenv("DEEPSEEK_API_KEY", "").strip():
+        raise RuntimeError(
+            "未设置 DEEPSEEK_API_KEY，请检查 .env 或环境变量。"
+        )
+
+    yield
 
 
-app = FastAPI(title="社区 Agent 服务") #new 一个 FastAPI 对象，命名（赋值）为 app
+app = FastAPI(
+    title="社区 Agent 服务",
+    lifespan=lifespan
+)#new 一个 FastAPI 对象，命名（赋值）为 app
 
 
 class AgentRequest(BaseModel):
