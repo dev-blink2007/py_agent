@@ -4,6 +4,9 @@ import urllib.request
 import urllib.error
 from tools import search_tool,detail_tool,execute_tool
 from config import DEEPSEEK_MODEL
+from time import perf_counter
+from tool_policy import plan_tool_batch
+
 def call_model(messages,tools):
     api_key = os.getenv("DEEPSEEK_API_KEY")
 
@@ -40,9 +43,18 @@ def call_model(messages,tools):
 
         # 5. JSON 字符串 → Python 字典。
         result = json.loads(response_text)
+        usage = result.get("usage")
+
+        print(
+            "本轮模型 Token 用量：",
+            json.dumps(usage, ensure_ascii=False)
+        )
 
         # 请你在这里补上一行：打印模型回答。
-        return result["choices"][0]["message"]
+        return {
+            "message": result["choices"][0]["message"],
+            "usage": result.get("usage")
+        }
     
     except urllib.error.HTTPError as error:
         print("HTTP 请求失败，状态码：", error.code)
@@ -89,6 +101,15 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
     stop_reason = "max_model_calls"
     blocked_tool_calls = []
     tool_records = []
+    discovered_post_ids = set()
+    started_at = perf_counter()
+    model_seconds = 0.0
+    tool_seconds = 0.0
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    usage_reported_calls = 0
+    
 
     run_error = None
 
@@ -97,8 +118,11 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
         print("模型调用轮次：", step + 1)
         model_calls += 1
     
+        model_started = perf_counter()
+
         try:
-            reply = call_model(messages, [search_tool, detail_tool])
+            model_response = call_model(messages, [search_tool, detail_tool])
+
         except urllib.error.HTTPError as error:
             run_error = {
                 "type": "model_http_error",
@@ -107,6 +131,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             }
             stop_reason = "model_error"
             break
+
         except urllib.error.URLError:
             run_error = {
                 "type": "model_connection_error",
@@ -114,6 +139,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             }
             stop_reason = "model_error"
             break
+
         except TimeoutError:
             run_error = {
                 "type": "model_timeout",
@@ -121,7 +147,19 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             }
             stop_reason = "model_error"
             break
-  
+
+        finally:
+            model_seconds += perf_counter() - model_started
+        
+        reply = model_response["message"]
+        usage = model_response["usage"]
+
+        if usage is not None:
+            prompt_tokens += usage["prompt_tokens"]
+            completion_tokens += usage["completion_tokens"]
+            total_tokens += usage["total_tokens"]
+            usage_reported_calls += 1
+        
         messages.append(reply)
 
         tool_calls = reply.get("tool_calls", [])
@@ -131,49 +169,103 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             stop_reason = "completed"
             break
 
-        if tool_attempts + len(tool_calls) > max_tool_calls:
-            blocked_tool_calls = tool_calls
-            stop_reason = "tool_budget_exceeded"
-            break
-        
-        for tool_call in tool_calls:
-    
+        remaining_budget = max_tool_calls - tool_attempts
+
+        plan = plan_tool_batch(
+            tool_calls,
+            remaining_budget,
+            discovered_post_ids
+        )
+
+        # 保存本批每个请求的结果，稍后统一回传。
+        batch_results = {}
+
+        # 1. 按调度顺序执行被选中的工具。
+        for tool_call in plan["selected"]:
             tool_name = tool_call["function"]["name"]
-    
             arguments_text = tool_call["function"]["arguments"]
+
             print("工具请求：", tool_name, arguments_text)
 
             if tool_name == "search_posts":
                 search_calls += 1
             elif tool_name == "fetch_post_detail":
-                detail_calls += 1    
-        
-            # 参数解析、检查和函数执行，统一交给 execute_tool。
+                detail_calls += 1
+
             tool_attempts += 1
+            tool_started = perf_counter()
+
             result = execute_tool(tool_name, arguments_text)
+
+            tool_elapsed = perf_counter() - tool_started
+            tool_seconds += tool_elapsed
+
             tool_records.append({
                 "round": step + 1,
                 "tool_call_id": tool_call["id"],
                 "name": tool_name,
                 "arguments": arguments_text,
-                "result": result
+                "result": result,
+                "duration_ms": round(tool_elapsed * 1000, 2)
             })
-            print("工具执行结果：", result)
 
-            # 无论成功还是失败，都把结果回传给模型。
+            print("工具执行结果：", result)
+            batch_results[tool_call["id"]] = result
+
+            # 只有真实搜索成功后，才更新已发现的帖子 ID。
+            if tool_name == "search_posts" and result.get("ok") is True:
+                for post in result["data"]["posts"]:
+                    post_id = post["id"]
+                    if type(post_id) is int and post_id > 0:
+                        discovered_post_ids.add(post_id)
+
+        # 2. 为未执行的请求生成明确的拒绝结果。
+        for blocked in plan["blocked"]:
+            tool_call = blocked["tool_call"]
+            reason = blocked["reason"]
+
+            if reason == "tool_budget_exceeded":
+                message = "本次任务的工具执行预算不足，该请求未执行"
+            else:
+                message = "未知工具，该请求未执行"
+
+            result = {
+                "ok": False,
+                "error": message,
+                "code": reason,
+                "retryable": False
+            }
+
+            batch_results[tool_call["id"]] = result
+
+            # 保留原有 function/id 结构，兼容现有打印代码。
+            # 增加 round 和 reason，方便排查为什么没有执行。
+            blocked_tool_calls.append({
+                **tool_call,
+                "round": step + 1,
+                "reason": reason
+            })
+
+            print(
+                "工具请求未执行：",
+                tool_call["function"]["name"],
+                reason
+            )
+
+        # 3. 按模型原来的请求顺序，逐个回传对应结果。
+        # 实际执行顺序可以不同，关联依靠 tool_call_id。
+        for tool_call in tool_calls:
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
-                "content": json.dumps(result, ensure_ascii=False)
+                "content": json.dumps(
+                    batch_results[tool_call["id"]],
+                    ensure_ascii=False
+                )
             })  
 
     # 循环结束后，为未完成的任务提供明确说明。
-    if stop_reason == "tool_budget_exceeded":
-        answer = (
-            "本次任务因工具调用预算不足而停止，尚未完成。"
-            "已获取的资料可能不足，不能据此认定社区没有相关内容。"
-        )
-    elif stop_reason == "max_model_calls":
+    if stop_reason == "max_model_calls":
         answer = (
             "本次任务已达到模型调用轮数上限，尚未完成。"
             "目前无法给出完整结论。"
@@ -191,7 +283,17 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             "model_calls": model_calls,
             "search_calls": search_calls,
             "detail_calls": detail_calls,
-            "tool_calls": tool_attempts
+            "tool_calls": tool_attempts,
+            "duration_ms": round(
+                (perf_counter() - started_at) * 1000, 2
+            ),
+            "model_duration_ms": round(model_seconds * 1000, 2),
+            "tool_duration_ms": round(tool_seconds * 1000, 2),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "usage_reported_calls": usage_reported_calls,
+            "usage_complete": usage_reported_calls == model_calls,
         },
         "tool_records": tool_records,
         "error":run_error,
