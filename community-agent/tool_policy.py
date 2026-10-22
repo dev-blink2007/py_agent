@@ -1,7 +1,11 @@
 import json
 
 
-ALLOWED_TOOLS = {"search_posts", "fetch_post_detail"}
+ALLOWED_TOOLS = {
+    "search_posts",
+    "semantic_search_posts",
+    "fetch_post_detail",
+}
 
 
 def is_priority_detail(tool_call, discovered_post_ids):

@@ -1,5 +1,6 @@
 import json
 from community_client import fetch_post_detail, fetch_post_list
+from retrieval_client import fetch_semantic_posts
 posts = [
     {"id": 1, "title": "GORM 连接池配置", "content": "介绍数据库连接池参数。"},
     {"id": 2, "title": "Redis 缓存入门", "content": "介绍缓存的基本使用。"},
@@ -19,7 +20,11 @@ def search_posts(keyword):
     return results
 
 def execute_tool(tool_name, arguments_text):
-    if tool_name not in ("search_posts", "fetch_post_detail"):
+    if tool_name not in (
+        "search_posts",
+        "semantic_search_posts",
+        "fetch_post_detail",
+    ):
         return {"ok": False, "error": "未知工具"}
 
     try:
@@ -40,6 +45,10 @@ def execute_tool(tool_name, arguments_text):
             return {"ok": False, "error": "搜索关键词不能为空"}
 
         return fetch_post_list(keyword)
+    elif tool_name == "semantic_search_posts":
+        query = arguments.get("query")
+
+        return fetch_semantic_posts(query)
     else:
         post_id = arguments.get("post_id")
 
@@ -106,4 +115,32 @@ detail_tool = {
             "required": ["post_id"]
         }
     }
+}
+semantic_tool = {
+    "type": "function",
+    "function": {
+        "name": "semantic_search_posts",
+        "description": (
+            "按语义相似度查找社区帖子，"
+            "适合描述经历、现象或使用不同措辞的问题。"
+            "query 应是简洁的自然语言查询。"
+            "返回最多3篇候选帖子的ID、标题和相似度分数。"
+            "候选可能不相关，分数不是答案正确的概率。"
+            "结果来自索引快照；需要正文时调用fetch_post_detail，"
+            "根据实际读取的正文判断是否相关、能否回答。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "需要查找的内容，用自然语言描述",
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
 }
