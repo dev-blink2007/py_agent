@@ -6,6 +6,7 @@ from tools import search_tool,detail_tool,semantic_tool,execute_tool
 from config import DEEPSEEK_MODEL
 from time import perf_counter
 from tool_policy import plan_tool_batch
+from detail_cache import read_detail_with_cache
 
 def call_model(messages,tools):
     api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -112,6 +113,9 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
     completion_tokens = 0
     total_tokens = 0
     usage_reported_calls = 0
+    detail_cache = {}
+    detail_cache_hits = 0
+    detail_backend_calls = 0  #通过执行器调用详情客户端的次数，包括客户端返回失败
     
 
     run_error = None
@@ -202,7 +206,43 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             tool_attempts += 1
             tool_started = perf_counter()
 
-            result = execute_tool(tool_name, arguments_text)
+            cache_hit = False
+            valid_detail_request = False
+
+            if tool_name == "fetch_post_detail":
+                # 缓存访问前也要确认参数合法，
+                # 避免缓存命中绕过原有的参数校验。
+                try:
+                    arguments = json.loads(arguments_text)
+                except (json.JSONDecodeError, TypeError):
+                    arguments = None
+
+                if isinstance(arguments, dict):
+                    post_id = arguments.get("post_id")
+                    valid_detail_request = (
+                        type(post_id) is int
+                        and post_id > 0
+                    )
+
+            if valid_detail_request:   #检查帖子是否合法
+                result, cache_hit = read_detail_with_cache(
+                    post_id,
+                    detail_cache,
+                    lambda requested_id: execute_tool(
+                        "fetch_post_detail",
+                        json.dumps({"post_id": requested_id}),  
+                    ),
+                )
+
+                if cache_hit:
+                    detail_cache_hits += 1
+                else:
+                    detail_backend_calls += 1
+
+            else:
+                # 其他工具，以及非法详情参数，
+                # 继续交给原来的执行器处理。
+                result = execute_tool(tool_name, arguments_text)
 
             tool_elapsed = perf_counter() - tool_started
             tool_seconds += tool_elapsed
@@ -211,6 +251,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
                 "round": step + 1,
                 "tool_call_id": tool_call["id"],
                 "name": tool_name,
+                "cache_hit": cache_hit,
                 "arguments": arguments_text,
                 "result": result,
                 "duration_ms": round(tool_elapsed * 1000, 2)
@@ -302,6 +343,8 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             "total_tokens": total_tokens,
             "usage_reported_calls": usage_reported_calls,
             "usage_complete": usage_reported_calls == model_calls,
+            "detail_cache_hits": detail_cache_hits,
+            "detail_backend_calls": detail_backend_calls,
         },
         "tool_records": tool_records,
         "error":run_error,
@@ -315,4 +358,4 @@ if __name__ == "__main__":
         "不能只依据搜索返回的片段作答。"
     )
 
-print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False, indent=2))

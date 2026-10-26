@@ -4,7 +4,16 @@ from run_logger import save_run
 
 
 def main():
+    target_ids = {
+        "rag_connection_fix",
+        "rag_missing_configuration",
+        "rag_missing_score",
+    }
     for case in EVAL_CASES:
+        if case["id"] not in target_ids:
+            continue
+
+        # 保留后面的运行、人工判断和保存代码。
         print("\n开始测试：", case["id"])
         print("问题：", case["question"])
 
