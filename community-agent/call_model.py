@@ -7,8 +7,9 @@ from config import DEEPSEEK_MODEL
 from time import perf_counter
 from tool_policy import plan_tool_batch
 from detail_cache import read_detail_with_cache
+from time_budget import get_call_timeout,AgentDeadlineExceeded
 
-def call_model(messages,tools):
+def call_model(messages,tools,timeout=120):
     api_key = os.getenv("DEEPSEEK_API_KEY")
 
     if not api_key:
@@ -38,7 +39,7 @@ def call_model(messages,tools):
 
     try:
         # 4. 发送请求，并读取响应。
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             print("HTTP 状态码：", response.status)
             response_text = response.read().decode("utf-8")
 
@@ -66,7 +67,7 @@ def call_model(messages,tools):
         print("网络请求失败：", error.reason)
         raise
 
-def run_agent(question, max_model_calls=5, max_tool_calls=4):
+def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds=20):
 
     SYSTEM_PROMPT = """
     你是社区资料助手。
@@ -107,6 +108,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
     tool_records = []
     discovered_post_ids = set() #
     started_at = perf_counter()
+    deadline = started_at + max_duration_seconds
     model_seconds = 0.0
     tool_seconds = 0.0
     prompt_tokens = 0
@@ -121,6 +123,15 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
     run_error = None
 
     for step in range(max_model_calls):
+        try:
+            model_timeout = get_call_timeout(
+                deadline,
+                120,
+                perf_counter(),
+            )
+        except AgentDeadlineExceeded:
+            stop_reason = "deadline_exceeded"
+            break
     
         print("模型调用轮次：", step + 1)
         model_calls += 1
@@ -131,6 +142,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             model_response = call_model(
                 messages,
                 [search_tool, semantic_tool, detail_tool],
+                timeout=model_timeout
             )
         except urllib.error.HTTPError as error:
             run_error = {
@@ -138,7 +150,10 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
                 "status": error.code,
                 "message": "模型接口返回错误"
             }
-            stop_reason = "model_error"
+            if perf_counter < deadline:
+                stop_reason = "model_error"
+            else:
+                stop_reason = "deadline_exceeded"
             break
 
         except urllib.error.URLError:
@@ -146,7 +161,10 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
                 "type": "model_connection_error",
                 "message": "无法连接模型服务"
             }
-            stop_reason = "model_error"
+            if perf_counter < deadline:
+                stop_reason = "model_error"
+            else:
+                stop_reason = "deadline_exceeded"
             break
 
         except TimeoutError:
@@ -154,7 +172,10 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
                 "type": "model_timeout",
                 "message": "模型请求超时"
             }
-            stop_reason = "model_error"
+            if perf_counter < deadline:
+                stop_reason = "model_error"
+            else:
+                stop_reason = "deadline_exceeded"
             break
 
         finally:
@@ -168,6 +189,10 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
             completion_tokens += usage["completion_tokens"]
             total_tokens += usage["total_tokens"]
             usage_reported_calls += 1
+
+        if perf_counter() >= deadline:
+            stop_reason = "deadline_exceeded"
+            break
         
         messages.append(reply)
 
@@ -322,6 +347,10 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4):
         answer = (
             "本次任务因模型服务请求失败而停止，尚未完成。"
             "请稍后重试。"
+        )
+    elif stop_reason == "deadline_exceeded":
+        answer = (
+            "本次任务已达到总时间预算，尚未完成。已有检索结果不能据此认定社区没有相关资料。"
         )
 
     return {

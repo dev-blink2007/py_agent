@@ -3,10 +3,6 @@ from retrieval_eval_cases import RETRIEVAL_CASES
 
 
 def is_hit(candidate_ids, evidence_ids, k):
-    # TODO：
-    # 取 candidate_ids 的前 k 个 ID。
-    # 判断它们与 evidence_ids 是否有交集。
-    # 返回 True 或 False。
     order = candidate_ids[:k]
     for id in evidence_ids:
         if id in order:

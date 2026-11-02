@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 
 from inspect_real_posts import fetch_all_posts
 from semantic_retrieval import build_index, search_index
+from index_storage import save_index,load_index
 
 import logging
 from threading import Lock
@@ -55,14 +56,34 @@ async def lifespan(app: FastAPI):
 
     print("开始读取社区帖子并建立索引……")
 
-    posts = fetch_all_posts()
-    index = build_index(model, posts)
-    index["version"] = uuid4().hex
-    app.state.refresh_lock = Lock()
+    try:
+        index = load_index()
 
-    # 保存到当前应用实例，供后面的请求复用。
+    except ValueError:
+        logging.error("初始化索引文件无效，加载出错")
+        index = None
+
+    except Exception:
+        raise 
+    
+    if index is None:
+        posts = fetch_all_posts()
+        index = build_index(model, posts)
+        index["version"] = uuid4().hex
+    
+        try:
+            save_index(index)
+            app.state.save_version = index["version"]
+        except OSError:
+            logging.exception("启动索引已构建，但保存失败：index_version=%s",index["version"],)
+            app.state.save_version = None
+    else:
+        app.state.save_version = index["version"]
+    
+    app.state.refresh_lock = Lock()
     app.state.retrieval_model = model
     app.state.retrieval_index = index
+    
 
     print(
         "检索服务准备完成，已索引帖子数：",
@@ -74,6 +95,7 @@ async def lifespan(app: FastAPI):
     # 服务退出时释放应用持有的引用。
     del app.state.retrieval_index
     del app.state.retrieval_model
+    del app.state.save_version
 
 
 app = FastAPI(lifespan=lifespan)
@@ -88,6 +110,7 @@ def health(request: Request):
         "service": "community-retrieval",
         "indexed_posts": len(index["documents"]),
         "index_version": index["version"],
+        "save_version": request.app.state.save_version
     }
 
 @app.post("/search")
@@ -122,34 +145,47 @@ def refresh_index(request: Request):
         )
 
     try:
-        model = state.retrieval_model
+        try:
+            model = state.retrieval_model
 
-        # 准备阶段：读取资料、建立新索引。
-        # 此时正在使用的旧索引仍然保留。
-        posts = fetch_all_posts()
-        new_index = build_index(model, posts)
-        new_index["version"] = uuid4().hex
-
-        # TODO：提交阶段。
-        # 用 new_index 替换应用正在使用的 retrieval_index。
-        # 请补充一行代码。
+            # 准备阶段：读取资料、建立新索引。
+            # 此时正在使用的旧索引仍然保留。
+            posts = fetch_all_posts()
+            new_index = build_index(model, posts)
+            new_index["version"] = uuid4().hex
+        except Exception:
+            logging.exception("索引构建失败，旧索引仍保留")
+            raise HTTPException(
+                status_code=503,
+                detail="索引构建失败，旧索引仍保留",
+            )
+        
         state.retrieval_index = new_index
-
-        return {
-            "ok": True,
-            "data": {
-                "indexed_posts": len(new_index["documents"]),
-                "index_version": new_index["version"],
-            },
-        }
-
-    except Exception:
-        logging.exception("索引刷新失败，保留旧索引")
-
-        raise HTTPException(
-            status_code=503,
-            detail="索引刷新失败，旧索引仍保留",
-        )
+        try:
+            save_index(new_index)
+            state.save_version = new_index["version"]
+            return{
+                "activated":True,
+                "save_ok":True,
+                "index_version":new_index["version"],
+                "save_version":new_index["version"],
+                "data": {
+                    "indexed_posts": len(new_index["documents"]),
+                    "index_chunks": len(new_index["chunks"])
+                }
+            }
+        except OSError:
+            logging.exception("索引已生效,但保存失败:index_version=%s,save_version=%s",new_index["version"],state.save_version,)
+            return{
+                "activated":True,
+                "save_ok":False,
+                "index_version":new_index["version"],
+                "save_version":state.save_version,
+                "data": {
+                    "indexed_posts": len(new_index["documents"]),
+                    "index_chunks": len(new_index["chunks"])
+                }
+            }
 
     finally:
         state.refresh_lock.release()
