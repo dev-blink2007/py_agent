@@ -150,7 +150,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                 "status": error.code,
                 "message": "模型接口返回错误"
             }
-            if perf_counter < deadline:
+            if perf_counter() < deadline:
                 stop_reason = "model_error"
             else:
                 stop_reason = "deadline_exceeded"
@@ -161,7 +161,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                 "type": "model_connection_error",
                 "message": "无法连接模型服务"
             }
-            if perf_counter < deadline:
+            if perf_counter() < deadline:
                 stop_reason = "model_error"
             else:
                 stop_reason = "deadline_exceeded"
@@ -172,7 +172,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                 "type": "model_timeout",
                 "message": "模型请求超时"
             }
-            if perf_counter < deadline:
+            if perf_counter() < deadline:
                 stop_reason = "model_error"
             else:
                 stop_reason = "deadline_exceeded"
@@ -213,9 +213,19 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
 
         # 保存本批每个请求的结果，稍后统一回传。
         batch_results = {}
+        selected = plan["selected"]
 
         # 1. 按调度顺序执行被选中的工具。
-        for tool_call in plan["selected"]:
+        for i, tool_call in enumerate(selected):
+            remaining = deadline - perf_counter()
+            if remaining <= 0:
+                for tool_call_blocked in selected[i:]:
+                    plan["blocked"].append({
+                        "tool_call":tool_call_blocked,
+                        "reason":"deadline_exceeded"
+                    })
+                stop_reason = "deadline_exceeded"
+                break
             tool_name = tool_call["function"]["name"]
             arguments_text = tool_call["function"]["arguments"]
 
@@ -255,7 +265,8 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                     detail_cache,
                     lambda requested_id: execute_tool(
                         "fetch_post_detail",
-                        json.dumps({"post_id": requested_id}),  
+                        json.dumps({"post_id": requested_id}), 
+                        timeout=remaining 
                     ),
                 )
 
@@ -267,7 +278,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
             else:
                 # 其他工具，以及非法详情参数，
                 # 继续交给原来的执行器处理。
-                result = execute_tool(tool_name, arguments_text)
+                result = execute_tool(tool_name, arguments_text,timeout=remaining)
 
             tool_elapsed = perf_counter() - tool_started
             tool_seconds += tool_elapsed
@@ -291,6 +302,15 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                     post_id = post["id"]
                     if type(post_id) is int and post_id > 0:
                         discovered_post_ids.add(post_id)
+            remaining = deadline - perf_counter()
+            if remaining <= 0:
+                for tool_call_blocked in selected[i+1:]:
+                    plan["blocked"].append({
+                        "tool_call":tool_call_blocked,
+                        "reason":"deadline_exceeded"
+                    })
+                stop_reason = "deadline_exceeded"
+                break
 
         # 2. 为未执行的请求生成明确的拒绝结果。
         for blocked in plan["blocked"]:
@@ -299,6 +319,8 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
 
             if reason == "tool_budget_exceeded":
                 message = "本次任务的工具执行预算不足，该请求未执行"
+            elif reason == "deadline_exceeded":
+                message = "总时间预算已耗尽，该请求未执行"
             else:
                 message = "未知工具，该请求未执行"
 
@@ -314,7 +336,7 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
             # 保留原有 function/id 结构，兼容现有打印代码。
             # 增加 round 和 reason，方便排查为什么没有执行。
             blocked_tool_calls.append({
-                **tool_call,
+                **tool_call,   #把 tool_call 字典里的所有键值对，复制进新字典中
                 "round": step + 1,
                 "reason": reason
             })
@@ -336,6 +358,9 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
                     ensure_ascii=False
                 )
             })  
+
+        if stop_reason == "deadline_exceeded":
+            break
 
     # 循环结束后，为未完成的任务提供明确说明。
     if stop_reason == "max_model_calls":

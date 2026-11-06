@@ -5,11 +5,12 @@ import urllib.parse
 from config import COMMUNITY_BASE_URL
 
 
-def fetch_post_detail(post_id):
+def fetch_post_detail(post_id,timeout = None):
     url = f"{COMMUNITY_BASE_URL}/api/post/{post_id}"
+    request_timeout = 5 if timeout is None else min(5, timeout)
 
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
+        with urllib.request.urlopen(url, timeout=request_timeout) as response:
             response_text = response.read().decode("utf-8")
 
         payload = json.loads(response_text)
@@ -56,16 +57,17 @@ def fetch_post_detail(post_id):
             "retryable": True
         }
 
-def fetch_post_list(keyword):
+def fetch_post_list(keyword,timeout = None):
     params = urllib.parse.urlencode({ #urlencode() 会把中文、空格、& 等字符编码成适合 URL 查询参数的形式。这样不会把关键词里的 & 误当成参数分隔符
         "keyword": keyword,
         "page": 1,
         "size": 5
     })
     url = f"{COMMUNITY_BASE_URL}/api/posts?{params}"
+    request_timeout = 5 if timeout is None else min(5, timeout)
 
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
+        with urllib.request.urlopen(url, timeout=request_timeout) as response:
             response_text = response.read().decode("utf-8")
 
     except urllib.error.HTTPError as error:

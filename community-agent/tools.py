@@ -1,25 +1,8 @@
 import json
 from community_client import fetch_post_detail, fetch_post_list
 from retrieval_client import fetch_semantic_posts
-posts = [
-    {"id": 1, "title": "GORM 连接池配置", "content": "介绍数据库连接池参数。"},
-    {"id": 2, "title": "Redis 缓存入门", "content": "介绍缓存的基本使用。"},
-    {"id": 3, "title": "排查数据库超时", "content": "记录 GORM 查询超时的排查过程。"}
-]
 
-def search_posts(keyword):
-    if keyword == "":
-        return []
-    results = []
-    for post in posts:
-        if keyword in post["title"] or keyword in post["content"]:
-            results.append({
-            "id": post["id"],
-            "title": post["title"]
-        })
-    return results
-
-def execute_tool(tool_name, arguments_text):
+def execute_tool(tool_name, arguments_text,timeout = None):
     if tool_name not in (
         "search_posts",
         "semantic_search_posts",
@@ -44,35 +27,19 @@ def execute_tool(tool_name, arguments_text):
         if not keyword:
             return {"ok": False, "error": "搜索关键词不能为空"}
 
-        return fetch_post_list(keyword)
+        return fetch_post_list(keyword,timeout=timeout)
     elif tool_name == "semantic_search_posts":
         query = arguments.get("query")
 
-        return fetch_semantic_posts(query)
+        return fetch_semantic_posts(query,timeout=timeout)
     else:
         post_id = arguments.get("post_id")
 
         if type(post_id) is not int or post_id <= 0:
             return {"ok": False, "error": "post_id 必须是正整数"}
 
-        return fetch_post_detail(post_id)
-
-def get_post_detail(post_id):
-    for post in posts:
-        if post["id"] == post_id:
-            return post
-    return None
+        return fetch_post_detail(post_id,timeout=timeout)
     
-if __name__ == "__main__":
-    print(execute_tool("search_posts", '{"keyword": "GORM"}'))
-    print(execute_tool("search_posts", '{"keyword": 123}'))
-    print(execute_tool("search_posts", '{}'))
-    print(execute_tool("search_posts", '不是JSON'))
-    print(execute_tool("unknown_tool", '{"keyword": "GORM"}'))
-    print(execute_tool("get_post_detail", '{"post_id": 3}'))
-    print(execute_tool("get_post_detail", '{"post_id": 999}'))
-    print(execute_tool("get_post_detail", '{"post_id": "3"}'))
-
 parameters = {
     "type": "object",
     "properties": {

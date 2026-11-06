@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
-def fetch_semantic_posts(query):
+def fetch_semantic_posts(query,timeout = None):
+    request_timeout = 5 if timeout is None else min(15, timeout)
     if not isinstance(query, str) or not query.strip():
         return {
             "ok": False,
@@ -46,7 +47,7 @@ def fetch_semantic_posts(query):
 
     try:
         with urllib.request.urlopen(
-            request, timeout=15
+            request, timeout=request_timeout
         ) as response:
             payload = json.loads(
                 response.read().decode("utf-8")
