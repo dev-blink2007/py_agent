@@ -90,6 +90,11 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
         可以明确回答“已读取的帖子未提供”，不必为了填补缺失信息持续搜索。
     10. 只有当前结果明显不相关，或用户明确要求扩大检索范围时，
         才继续更换关键词搜索。不要重复读取已经读取过的帖子。。
+    11.检索结果中的 matched_chunk 只是命中片段。
+        引用它时应说明“检索片段显示”，不能声称已经读取完整正文。
+        只有 fetch_post_detail 成功返回后，才能声称读取了该帖完整正文。
+        尚未读取正文时，应说明“尚未读取正文，无法确认”，
+        不要说“已读取的帖子未提供”。
     """
 
     messages = [
@@ -229,6 +234,18 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
             tool_name = tool_call["function"]["name"]
             arguments_text = tool_call["function"]["arguments"]
 
+            if (
+                tool_name in ("search_posts", "semantic_search_posts")
+                and max_tool_calls - tool_attempts == 1
+                and discovered_post_ids
+                and not detail_cache
+            ):
+                plan["blocked"].append({
+                    "tool_call": tool_call,
+                    "reason": "detail_budget_reserved",
+                })
+                continue
+
             print("工具请求：", tool_name, arguments_text)
 
             if tool_name == "search_posts":
@@ -319,6 +336,13 @@ def run_agent(question, max_model_calls=5, max_tool_calls=4,max_duration_seconds
 
             if reason == "tool_budget_exceeded":
                 message = "本次任务的工具执行预算不足，该请求未执行"
+            elif reason == "detail_budget_reserved":
+                message = (
+                    "尚有1次工具额度，已保留用于读取详情，本次搜索未执行。"
+                    f"已发现候选ID：{sorted(discovered_post_ids)}。"
+                    "请从中选择与问题相关的帖子调用fetch_post_detail；"
+                    "如果候选明显无关，请说明资料不足，不要猜测答案。"
+                )
             elif reason == "deadline_exceeded":
                 message = "总时间预算已耗尽，该请求未执行"
             else:
